@@ -1,28 +1,78 @@
 #!/usr/bin/env python3
-"""XAUUSD (gold) technical analysis skeleton.
+"""XAUUSD (gold) technical analysis.
 
-Plug in a real data source in fetch_price_data(), then run:
-    python xauusd_analysis.py
+Data source: Twelve Data (https://twelvedata.com), free tier.
+Get a free API key at https://twelvedata.com/pricing and either:
+    export TWELVEDATA_API_KEY=your_key_here
+or pass --api-key your_key_here on the command line.
+
+Usage:
+    python xauusd_analysis.py --interval 1h --lookback 300
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 
-import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
+import requests
+
+TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
 
-def fetch_price_data(symbol: str = "XAUUSD", interval: str = "1h", lookback: int = 500) -> pd.DataFrame:
+def fetch_price_data(
+    symbol: str = "XAU/USD",
+    interval: str = "1h",
+    lookback: int = 300,
+    api_key: str | None = None,
+) -> pd.DataFrame:
     """Return an OHLCV DataFrame indexed by timestamp, columns: open, high, low, close, volume.
 
-    TODO: wire this up to your data provider (broker API, yfinance, Alpha Vantage,
-    Twelve Data, MetaTrader, etc.) and return real historical/intraday candles.
+    Pulls candles from the Twelve Data time_series endpoint. Requires an API
+    key: pass api_key explicitly or set the TWELVEDATA_API_KEY env var.
     """
-    raise NotImplementedError(
-        "fetch_price_data() is a stub - connect it to a real XAUUSD data source"
+    api_key = api_key or os.environ.get("TWELVEDATA_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "No Twelve Data API key found. Set the TWELVEDATA_API_KEY env var "
+            "or pass --api-key. Get a free key at https://twelvedata.com/pricing"
+        )
+
+    response = requests.get(
+        TWELVEDATA_URL,
+        params={
+            "symbol": symbol,
+            "interval": interval,
+            "outputsize": lookback,
+            "apikey": api_key,
+            "format": "JSON",
+        },
+        timeout=15,
     )
+    response.raise_for_status()
+    return _parse_twelvedata_response(response.json())
+
+
+def _parse_twelvedata_response(payload: dict) -> pd.DataFrame:
+    if payload.get("status") == "error":
+        raise RuntimeError(f"Twelve Data API error: {payload.get('message')}")
+
+    values = payload.get("values")
+    if not values:
+        raise RuntimeError("Twelve Data API returned no candle data")
+
+    df = pd.DataFrame(values)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime").sort_index()
+    for col in ("open", "high", "low", "close"):
+        df[col] = df[col].astype(float)
+    df["volume"] = df["volume"].astype(float) if "volume" in df.columns else 0.0
+    return df[["open", "high", "low", "close", "volume"]]
 
 
 def sma(series: pd.Series, period: int) -> pd.Series:
@@ -142,17 +192,51 @@ def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
         print("Overall bias: NEUTRAL")
 
 
+def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
+    fig, (ax_price, ax_rsi) = plt.subplots(
+        2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    )
+
+    ax_price.plot(df.index, df["close"], label="Close", color="black", linewidth=1.2)
+    ax_price.plot(df.index, df["sma_20"], label="SMA 20", linewidth=1)
+    ax_price.plot(df.index, df["sma_50"], label="SMA 50", linewidth=1)
+    ax_price.fill_between(
+        df.index, df["bb_lower"], df["bb_upper"], color="gray", alpha=0.15, label="Bollinger Bands"
+    )
+    ax_price.set_ylabel("Price (USD)")
+    ax_price.set_title("XAUUSD Price & Moving Averages")
+    ax_price.legend(loc="upper left")
+
+    ax_rsi.plot(df.index, df["rsi_14"], color="purple", linewidth=1)
+    ax_rsi.axhline(70, color="red", linestyle="--", linewidth=0.8)
+    ax_rsi.axhline(30, color="green", linestyle="--", linewidth=0.8)
+    ax_rsi.set_ylabel("RSI 14")
+    ax_rsi.set_ylim(0, 100)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Chart saved to {output_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="XAUUSD technical analysis")
-    parser.add_argument("--symbol", default="XAUUSD")
+    parser.add_argument("--symbol", default="XAU/USD")
     parser.add_argument("--interval", default="1h")
-    parser.add_argument("--lookback", type=int, default=500)
+    parser.add_argument("--lookback", type=int, default=300)
+    parser.add_argument("--api-key", default=None, help="Twelve Data API key (or set TWELVEDATA_API_KEY)")
+    parser.add_argument("--chart-output", default="xauusd_chart.png")
+    parser.add_argument("--data-output", default="xauusd_data.csv")
     args = parser.parse_args()
 
-    df = fetch_price_data(args.symbol, args.interval, args.lookback)
+    df = fetch_price_data(args.symbol, args.interval, args.lookback, api_key=args.api_key)
     df = compute_indicators(df)
     signals = generate_signals(df)
     print_summary(df, signals)
+
+    df.to_csv(args.data_output)
+    print(f"Data saved to {args.data_output}")
+    plot_chart(df, args.chart_output)
 
 
 if __name__ == "__main__":
