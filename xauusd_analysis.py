@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """XAUUSD (gold) technical analysis.
 
-Data source: Twelve Data (https://twelvedata.com), free tier.
-Get a free API key at https://twelvedata.com/pricing and either:
-    export TWELVEDATA_API_KEY=your_key_here
-or pass --api-key your_key_here on the command line.
+Data sources:
+  mt5 (default) - pulls real candles straight from a MetaTrader 5 terminal
+      logged into your Vantage account. Requires `pip install MetaTrader5`
+      (Windows only) and must run on the same machine/VPS as the terminal.
+      If the terminal is already open and logged in, no credentials are
+      needed; otherwise set MT5_LOGIN / MT5_PASSWORD / MT5_SERVER env vars
+      (or --mt5-login/--mt5-password/--mt5-server) to auto-launch and log in.
+
+  twelvedata - fallback REST API source, free tier at https://twelvedata.com.
+      Set TWELVEDATA_API_KEY or pass --api-key.
 
 Usage:
-    python xauusd_analysis.py --interval 1h --lookback 300
+    python xauusd_analysis.py --source mt5 --interval H1 --lookback 300
+    python xauusd_analysis.py --source twelvedata --interval 1h --lookback 300
 """
 
 from __future__ import annotations
@@ -24,8 +31,76 @@ import requests
 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
+MT5_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
 
-def fetch_price_data(
+
+def fetch_price_data_mt5(
+    symbol: str = "XAUUSD",
+    timeframe: str = "H1",
+    lookback: int = 300,
+    login: str | None = None,
+    password: str | None = None,
+    server: str | None = None,
+    path: str | None = None,
+) -> pd.DataFrame:
+    """Return an OHLCV DataFrame pulled live from a MetaTrader 5 terminal logged
+    into your Vantage account.
+
+    If the terminal is already running and logged in, just call this with no
+    credentials. Otherwise supply login/password/server (e.g. server=
+    "VantageInternational-Live 1") to have MT5 auto-launch and log in - get
+    these from your Vantage account details, not from this script.
+
+    Vantage sometimes suffixes the gold symbol per account type (e.g.
+    XAUUSD.a, XAUUSD_i, GOLD) - check your terminal's Market Watch if the
+    default "XAUUSD" isn't found.
+    """
+    import MetaTrader5 as mt5  # local import: package only installs/imports on Windows
+
+    login = login or os.environ.get("MT5_LOGIN")
+    password = password or os.environ.get("MT5_PASSWORD")
+    server = server or os.environ.get("MT5_SERVER")
+    path = path or os.environ.get("MT5_PATH")
+
+    init_kwargs = {}
+    if path:
+        init_kwargs["path"] = path
+    if login and password and server:
+        init_kwargs.update(login=int(login), password=password, server=server)
+
+    if not mt5.initialize(**init_kwargs):
+        raise RuntimeError(f"MT5 initialize() failed: {mt5.last_error()}")
+
+    try:
+        if not mt5.symbol_select(symbol, True):
+            raise RuntimeError(
+                f"Symbol '{symbol}' not available in Market Watch: {mt5.last_error()}. "
+                "Vantage sometimes suffixes gold symbols (e.g. XAUUSD.a, XAUUSD_i, GOLD) "
+                "- check your terminal's Market Watch for the exact name."
+            )
+
+        tf_const = getattr(mt5, f"TIMEFRAME_{timeframe}", None)
+        if tf_const is None:
+            raise ValueError(f"Unsupported timeframe '{timeframe}'. Choose from {MT5_TIMEFRAMES}")
+
+        rates = mt5.copy_rates_from_pos(symbol, tf_const, 0, lookback)
+        if rates is None or len(rates) == 0:
+            raise RuntimeError(f"No rates returned for {symbol}: {mt5.last_error()}")
+    finally:
+        mt5.shutdown()
+
+    return _parse_mt5_rates(rates)
+
+
+def _parse_mt5_rates(rates) -> pd.DataFrame:
+    df = pd.DataFrame(rates)
+    df["time"] = pd.to_datetime(df["time"], unit="s")
+    df = df.set_index("time").sort_index()
+    df = df.rename(columns={"tick_volume": "volume"})
+    return df[["open", "high", "low", "close", "volume"]]
+
+
+def fetch_price_data_twelvedata(
     symbol: str = "XAU/USD",
     interval: str = "1h",
     lookback: int = 300,
@@ -221,15 +296,34 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="XAUUSD technical analysis")
-    parser.add_argument("--symbol", default="XAU/USD")
-    parser.add_argument("--interval", default="1h")
+    parser.add_argument("--source", choices=["mt5", "twelvedata"], default="mt5")
+    parser.add_argument("--symbol", default=None, help="Defaults to XAUUSD for mt5, XAU/USD for twelvedata")
+    parser.add_argument("--interval", default=None, help="Defaults to H1 for mt5, 1h for twelvedata")
     parser.add_argument("--lookback", type=int, default=300)
     parser.add_argument("--api-key", default=None, help="Twelve Data API key (or set TWELVEDATA_API_KEY)")
+    parser.add_argument("--mt5-login", default=None, help="Vantage MT5 account login (or set MT5_LOGIN)")
+    parser.add_argument("--mt5-password", default=None, help="Vantage MT5 password (or set MT5_PASSWORD)")
+    parser.add_argument("--mt5-server", default=None, help='Vantage MT5 server, e.g. "VantageInternational-Live 1" (or set MT5_SERVER)')
+    parser.add_argument("--mt5-path", default=None, help="Path to terminal64.exe, if not auto-detected (or set MT5_PATH)")
     parser.add_argument("--chart-output", default="xauusd_chart.png")
     parser.add_argument("--data-output", default="xauusd_data.csv")
     args = parser.parse_args()
 
-    df = fetch_price_data(args.symbol, args.interval, args.lookback, api_key=args.api_key)
+    if args.source == "mt5":
+        df = fetch_price_data_mt5(
+            args.symbol or "XAUUSD",
+            args.interval or "H1",
+            args.lookback,
+            login=args.mt5_login,
+            password=args.mt5_password,
+            server=args.mt5_server,
+            path=args.mt5_path,
+        )
+    else:
+        df = fetch_price_data_twelvedata(
+            args.symbol or "XAU/USD", args.interval or "1h", args.lookback, api_key=args.api_key
+        )
+
     df = compute_indicators(df)
     signals = generate_signals(df)
     print_summary(df, signals)
