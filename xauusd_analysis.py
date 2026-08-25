@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""XAUUSD (gold) technical analysis.
+"""XAUUSD (gold) and BTCUSD (bitcoin) technical analysis.
 
 Data sources:
   mt5 (default) - pulls real candles straight from a MetaTrader 5 terminal
@@ -8,19 +8,26 @@ Data sources:
       If the terminal is already open and logged in, no credentials are
       needed; otherwise set MT5_LOGIN / MT5_PASSWORD / MT5_SERVER env vars
       (or --mt5-login/--mt5-password/--mt5-server) to auto-launch and log in.
+      BTCUSD requires your Vantage account to offer crypto CFDs - check
+      Market Watch for the exact symbol name (e.g. BTCUSD, BTCUSD.a).
 
   twelvedata - fallback REST API source, free tier at https://twelvedata.com.
-      Set TWELVEDATA_API_KEY or pass --api-key.
+      Set TWELVEDATA_API_KEY or pass --api-key. Supports crypto pairs
+      natively, so this is the simplest route for BTCUSD if you don't run
+      MT5 locally.
 
 Usage:
     python xauusd_analysis.py --source mt5 --interval H1 --lookback 300
     python xauusd_analysis.py --source twelvedata --interval 1h --lookback 300
+    python xauusd_analysis.py --symbol BTCUSD --source twelvedata --interval 1h
+    python xauusd_analysis.py --symbol BTCUSD --watch --poll-interval 300
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import time
 from dataclasses import dataclass
 
 import matplotlib
@@ -32,6 +39,13 @@ import requests
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
 MT5_TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1"]
+
+# Maps a friendly --symbol preset to the source-specific symbol string.
+# Any other --symbol value is passed through to the source as-is.
+SYMBOL_PRESETS = {
+    "XAUUSD": {"mt5": "XAUUSD", "twelvedata": "XAU/USD"},
+    "BTCUSD": {"mt5": "BTCUSD", "twelvedata": "BTC/USD"},
+}
 
 
 def fetch_price_data_mt5(
@@ -188,6 +202,13 @@ def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -
     })
 
 
+def donchian_channel(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    """Prior N-bar high/low (current bar excluded), used to spot breakouts."""
+    high = df["high"].shift(1).rolling(period).max()
+    low = df["low"].shift(1).rolling(period).min()
+    return pd.DataFrame({"high": high, "low": low})
+
+
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"]
     out = df.copy()
@@ -206,6 +227,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["bb_upper"] = bb_df["upper"]
     out["bb_mid"] = bb_df["mid"]
     out["bb_lower"] = bb_df["lower"]
+
+    dc_df = donchian_channel(df, 20)
+    out["donchian_high"] = dc_df["high"]
+    out["donchian_low"] = dc_df["low"]
     return out
 
 
@@ -246,12 +271,60 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
     else:
         signals.append(Signal("bollinger", "neutral", "price within bands"))
 
+    if pd.notna(last["donchian_high"]) and last["close"] > last["donchian_high"]:
+        signals.append(Signal("breakout", "bullish", f"close broke above 20-bar high {last['donchian_high']:.2f}"))
+    elif pd.notna(last["donchian_low"]) and last["close"] < last["donchian_low"]:
+        signals.append(Signal("breakout", "bearish", f"close broke below 20-bar low {last['donchian_low']:.2f}"))
+    else:
+        signals.append(Signal("breakout", "neutral", "price within 20-bar range"))
+
     return signals
 
 
-def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
+def send_webhook_alert(webhook_url: str, text: str) -> None:
+    """POST a simple {"text": ...} / {"content": ...} payload, compatible
+    with Slack and Discord incoming webhooks."""
+    try:
+        requests.post(webhook_url, json={"text": text, "content": text}, timeout=10)
+    except requests.RequestException as exc:
+        print(f"Warning: webhook alert failed: {exc}")
+
+
+def watch_for_breakout(fetch_fn, symbol_label: str, poll_interval: int, webhook_url: str | None) -> None:
+    """Poll the data source on a fixed interval and alert the moment a new
+    Donchian breakout signal appears on the latest closed bar, so you catch
+    the next takeoff instead of finding out after the fact.
+    """
+    print(f"Watching {symbol_label} for breakouts every {poll_interval}s. Ctrl+C to stop.")
+    last_alerted_bar = None
+    while True:
+        try:
+            df = compute_indicators(fetch_fn())
+            last = df.iloc[-1]
+            bar_time = df.index[-1]
+
+            breakout = None
+            if pd.notna(last["donchian_high"]) and last["close"] > last["donchian_high"]:
+                breakout = f"BULLISH BREAKOUT: {symbol_label} closed {last['close']:.2f}, above 20-bar high {last['donchian_high']:.2f} (bar {bar_time})"
+            elif pd.notna(last["donchian_low"]) and last["close"] < last["donchian_low"]:
+                breakout = f"BEARISH BREAKDOWN: {symbol_label} closed {last['close']:.2f}, below 20-bar low {last['donchian_low']:.2f} (bar {bar_time})"
+
+            if breakout and last_alerted_bar != bar_time:
+                print(f"\a{breakout}")
+                if webhook_url:
+                    send_webhook_alert(webhook_url, breakout)
+                last_alerted_bar = bar_time
+            else:
+                print(f"{bar_time}  {symbol_label} {last['close']:.2f}  no new breakout")
+        except Exception as exc:
+            print(f"Warning: poll failed: {exc}")
+
+        time.sleep(poll_interval)
+
+
+def print_summary(df: pd.DataFrame, signals: list[Signal], symbol_label: str = "XAUUSD") -> None:
     last = df.iloc[-1]
-    print(f"XAUUSD close: {last['close']:.2f}  (as of {df.index[-1]})")
+    print(f"{symbol_label} close: {last['close']:.2f}  (as of {df.index[-1]})")
     print("-" * 50)
     for s in signals:
         print(f"{s.name:>10}: {s.verdict:<8} - {s.detail}")
@@ -267,7 +340,7 @@ def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
         print("Overall bias: NEUTRAL")
 
 
-def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
+def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png", symbol_label: str = "XAUUSD") -> None:
     fig, (ax_price, ax_rsi) = plt.subplots(
         2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
@@ -278,8 +351,10 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
     ax_price.fill_between(
         df.index, df["bb_lower"], df["bb_upper"], color="gray", alpha=0.15, label="Bollinger Bands"
     )
+    ax_price.plot(df.index, df["donchian_high"], label="20-bar high", color="green", linewidth=0.8, linestyle="--")
+    ax_price.plot(df.index, df["donchian_low"], label="20-bar low", color="red", linewidth=0.8, linestyle="--")
     ax_price.set_ylabel("Price (USD)")
-    ax_price.set_title("XAUUSD Price & Moving Averages")
+    ax_price.set_title(f"{symbol_label} Price & Moving Averages")
     ax_price.legend(loc="upper left")
 
     ax_rsi.plot(df.index, df["rsi_14"], color="purple", linewidth=1)
@@ -294,10 +369,19 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
     print(f"Chart saved to {output_path}")
 
 
+def resolve_symbol(symbol_arg: str | None, source: str) -> tuple[str, str]:
+    """Returns (source-specific symbol, friendly label) for a --symbol preset
+    (e.g. "BTCUSD") or a literal symbol string passed straight through."""
+    preset_key = (symbol_arg or "XAUUSD").upper()
+    if preset_key in SYMBOL_PRESETS:
+        return SYMBOL_PRESETS[preset_key][source], preset_key
+    return symbol_arg, symbol_arg
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="XAUUSD technical analysis")
+    parser = argparse.ArgumentParser(description="XAUUSD / BTCUSD technical analysis")
     parser.add_argument("--source", choices=["mt5", "twelvedata"], default="mt5")
-    parser.add_argument("--symbol", default=None, help="Defaults to XAUUSD for mt5, XAU/USD for twelvedata")
+    parser.add_argument("--symbol", default=None, help='Preset "XAUUSD" or "BTCUSD", or a literal source symbol')
     parser.add_argument("--interval", default=None, help="Defaults to H1 for mt5, 1h for twelvedata")
     parser.add_argument("--lookback", type=int, default=300)
     parser.add_argument("--api-key", default=None, help="Twelve Data API key (or set TWELVEDATA_API_KEY)")
@@ -307,30 +391,41 @@ def main() -> None:
     parser.add_argument("--mt5-path", default=None, help="Path to terminal64.exe, if not auto-detected (or set MT5_PATH)")
     parser.add_argument("--chart-output", default="xauusd_chart.png")
     parser.add_argument("--data-output", default="xauusd_data.csv")
+    parser.add_argument("--watch", action="store_true", help="Poll continuously and alert on new 20-bar breakouts instead of a one-shot analysis")
+    parser.add_argument("--poll-interval", type=int, default=300, help="Seconds between polls in --watch mode")
+    parser.add_argument("--webhook-url", default=None, help="Slack/Discord incoming webhook URL for breakout alerts in --watch mode")
     args = parser.parse_args()
 
-    if args.source == "mt5":
-        df = fetch_price_data_mt5(
-            args.symbol or "XAUUSD",
-            args.interval or "H1",
-            args.lookback,
-            login=args.mt5_login,
-            password=args.mt5_password,
-            server=args.mt5_server,
-            path=args.mt5_path,
-        )
-    else:
-        df = fetch_price_data_twelvedata(
-            args.symbol or "XAU/USD", args.interval or "1h", args.lookback, api_key=args.api_key
-        )
+    symbol, symbol_label = resolve_symbol(args.symbol, args.source)
 
-    df = compute_indicators(df)
+    if args.source == "mt5":
+        def fetch() -> pd.DataFrame:
+            return fetch_price_data_mt5(
+                symbol,
+                args.interval or "H1",
+                args.lookback,
+                login=args.mt5_login,
+                password=args.mt5_password,
+                server=args.mt5_server,
+                path=args.mt5_path,
+            )
+    else:
+        def fetch() -> pd.DataFrame:
+            return fetch_price_data_twelvedata(
+                symbol, args.interval or "1h", args.lookback, api_key=args.api_key
+            )
+
+    if args.watch:
+        watch_for_breakout(fetch, symbol_label, args.poll_interval, args.webhook_url)
+        return
+
+    df = compute_indicators(fetch())
     signals = generate_signals(df)
-    print_summary(df, signals)
+    print_summary(df, signals, symbol_label)
 
     df.to_csv(args.data_output)
     print(f"Data saved to {args.data_output}")
-    plot_chart(df, args.chart_output)
+    plot_chart(df, args.chart_output, symbol_label)
 
 
 if __name__ == "__main__":
