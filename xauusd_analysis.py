@@ -427,15 +427,30 @@ def print_summary(df: pd.DataFrame, signals: list[Signal], symbol_label: str = "
     for s in signals:
         print(f"{s.name:>10}: {s.verdict:<8} - {s.detail}")
 
+    print("-" * 50)
+    print(f"Overall bias: {overall_bias(signals)}")
+
+
+def overall_bias(signals: list[Signal]) -> str:
     bullish = sum(1 for s in signals if s.verdict == "bullish")
     bearish = sum(1 for s in signals if s.verdict == "bearish")
-    print("-" * 50)
     if bullish > bearish:
-        print("Overall bias: BULLISH")
-    elif bearish > bullish:
-        print("Overall bias: BEARISH")
-    else:
-        print("Overall bias: NEUTRAL")
+        return "BULLISH"
+    if bearish > bullish:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def build_digest_message(df: pd.DataFrame, signals: list[Signal], symbol_label: str) -> str:
+    """One-shot summary suitable for a daily cron job + webhook, rather than
+    the continuous polling --watch does."""
+    last = df.iloc[-1]
+    lines = [
+        f"{symbol_label} daily digest - close {last['close']:.2f} (as of {df.index[-1]})",
+        f"Overall bias: {overall_bias(signals)}",
+    ]
+    lines += [f"- {s.name}: {s.verdict} - {s.detail}" for s in signals]
+    return "\n".join(lines)
 
 
 def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png", symbol_label: str = "XAUUSD") -> None:
@@ -495,6 +510,7 @@ def main() -> None:
     parser.add_argument("--backtest", action="store_true", help="Backtest the Donchian breakout rule over --lookback bars instead of a live analysis")
     parser.add_argument("--backtest-period", type=int, default=20, help="Donchian channel period for --backtest")
     parser.add_argument("--backtest-chart-output", default="breakout_backtest.png")
+    parser.add_argument("--daily-digest", action="store_true", help="Print (and optionally webhook) a one-shot summary, meant to be run once a day via cron rather than polled with --watch")
     args = parser.parse_args()
 
     symbol, symbol_label = resolve_symbol(args.symbol, args.source)
@@ -525,6 +541,15 @@ def main() -> None:
         result, bt_df = backtest_breakout(raw, args.backtest_period)
         print_backtest_report(result, symbol_label, args.backtest_period, len(raw))
         plot_backtest_equity(bt_df, args.backtest_chart_output, symbol_label)
+        return
+
+    if args.daily_digest:
+        digest_df = compute_indicators(fetch())
+        digest_signals = generate_signals(digest_df)
+        message = build_digest_message(digest_df, digest_signals, symbol_label)
+        print(message)
+        if args.webhook_url:
+            send_webhook_alert(args.webhook_url, message)
         return
 
     df = compute_indicators(fetch())
