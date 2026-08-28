@@ -209,6 +209,104 @@ def donchian_channel(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
     return pd.DataFrame({"high": high, "low": low})
 
 
+@dataclass
+class BacktestResult:
+    trades: int
+    win_rate_pct: float
+    total_return_pct: float
+    buy_hold_return_pct: float
+    max_drawdown_pct: float
+    avg_win_pct: float
+    avg_loss_pct: float
+
+
+def backtest_breakout(df: pd.DataFrame, period: int = 20) -> tuple[BacktestResult, pd.DataFrame]:
+    """Stop-and-reverse Donchian breakout backtest: go long on a close above
+    the prior N-bar high, flip short on a close below the prior N-bar low,
+    and stay in that position until the opposite signal fires. No fees or
+    slippage are modeled, so treat results as an upper bound.
+
+    Returns (summary stats, DataFrame with position/equity columns added)
+    so the equity curve can also be plotted.
+    """
+    d = df.copy()
+    dc = donchian_channel(d, period)
+    d["donchian_high"] = dc["high"]
+    d["donchian_low"] = dc["low"]
+
+    position = pd.Series(0, index=d.index, dtype=int)
+    current = 0
+    for i in range(len(d)):
+        high, low, close = d["donchian_high"].iat[i], d["donchian_low"].iat[i], d["close"].iat[i]
+        if pd.notna(high) and close > high:
+            current = 1
+        elif pd.notna(low) and close < low:
+            current = -1
+        position.iat[i] = current
+    d["position"] = position
+
+    d["bar_return"] = d["close"].pct_change()
+    d["strategy_return"] = d["position"].shift(1).fillna(0) * d["bar_return"]
+    d["equity"] = (1 + d["strategy_return"].fillna(0)).cumprod()
+    d["buy_hold_equity"] = (1 + d["bar_return"].fillna(0)).cumprod()
+
+    # Per-trade returns: compound strategy_return over each run of bars that
+    # share the same (nonzero) position, i.e. from one flip to the next.
+    trade_returns = []
+    segment_start = 0
+    for i in range(1, len(d) + 1):
+        if i == len(d) or d["position"].iat[i] != d["position"].iat[segment_start]:
+            if d["position"].iat[segment_start] != 0:
+                seg_return = (1 + d["strategy_return"].iloc[segment_start:i]).prod() - 1
+                trade_returns.append(seg_return)
+            segment_start = i
+
+    wins = [r for r in trade_returns if r > 0]
+    losses = [r for r in trade_returns if r <= 0]
+
+    equity = d["equity"]
+    running_max = equity.cummax()
+    drawdown = (equity / running_max) - 1
+
+    result = BacktestResult(
+        trades=len(trade_returns),
+        win_rate_pct=(len(wins) / len(trade_returns) * 100) if trade_returns else 0.0,
+        total_return_pct=(equity.iloc[-1] - 1) * 100,
+        buy_hold_return_pct=(d["buy_hold_equity"].iloc[-1] - 1) * 100,
+        max_drawdown_pct=drawdown.min() * 100,
+        avg_win_pct=(sum(wins) / len(wins) * 100) if wins else 0.0,
+        avg_loss_pct=(sum(losses) / len(losses) * 100) if losses else 0.0,
+    )
+    return result, d
+
+
+def print_backtest_report(result: BacktestResult, symbol_label: str, period: int, bars: int) -> None:
+    print(f"{symbol_label} {period}-bar Donchian breakout backtest over {bars} bars")
+    print("-" * 60)
+    print(f"{'Trades:':<22}{result.trades}")
+    print(f"{'Win rate:':<22}{result.win_rate_pct:.1f}%")
+    print(f"{'Strategy return:':<22}{result.total_return_pct:+.1f}%")
+    print(f"{'Buy & hold return:':<22}{result.buy_hold_return_pct:+.1f}%")
+    print(f"{'Max drawdown:':<22}{result.max_drawdown_pct:.1f}%")
+    print(f"{'Avg win / trade:':<22}{result.avg_win_pct:+.1f}%")
+    print(f"{'Avg loss / trade:':<22}{result.avg_loss_pct:+.1f}%")
+    print("-" * 60)
+    print("No fees/slippage modeled - treat this as an upper bound, not a live estimate.")
+
+
+def plot_backtest_equity(d: pd.DataFrame, output_path: str, symbol_label: str) -> None:
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(d.index, d["equity"], label="Breakout strategy", color="tab:blue")
+    ax.plot(d.index, d["buy_hold_equity"], label="Buy & hold", color="gray", linestyle="--")
+    ax.set_ylabel("Equity (starting = 1.0)")
+    ax.set_title(f"{symbol_label} Donchian breakout backtest")
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    print(f"Backtest equity chart saved to {output_path}")
+
+
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"]
     out = df.copy()
@@ -394,6 +492,9 @@ def main() -> None:
     parser.add_argument("--watch", action="store_true", help="Poll continuously and alert on new 20-bar breakouts instead of a one-shot analysis")
     parser.add_argument("--poll-interval", type=int, default=300, help="Seconds between polls in --watch mode")
     parser.add_argument("--webhook-url", default=None, help="Slack/Discord incoming webhook URL for breakout alerts in --watch mode")
+    parser.add_argument("--backtest", action="store_true", help="Backtest the Donchian breakout rule over --lookback bars instead of a live analysis")
+    parser.add_argument("--backtest-period", type=int, default=20, help="Donchian channel period for --backtest")
+    parser.add_argument("--backtest-chart-output", default="breakout_backtest.png")
     args = parser.parse_args()
 
     symbol, symbol_label = resolve_symbol(args.symbol, args.source)
@@ -417,6 +518,13 @@ def main() -> None:
 
     if args.watch:
         watch_for_breakout(fetch, symbol_label, args.poll_interval, args.webhook_url)
+        return
+
+    if args.backtest:
+        raw = fetch()
+        result, bt_df = backtest_breakout(raw, args.backtest_period)
+        print_backtest_report(result, symbol_label, args.backtest_period, len(raw))
+        plot_backtest_equity(bt_df, args.backtest_chart_output, symbol_label)
         return
 
     df = compute_indicators(fetch())
