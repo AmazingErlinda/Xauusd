@@ -166,6 +166,11 @@
     border-color: var(--accent);
     color: var(--accent-ink);
   }
+  .stage.done .node{
+    background: var(--grow-soft);
+    border-color: var(--grow);
+    color: var(--grow);
+  }
   .thread{
     width:1px;
     flex:1;
@@ -195,6 +200,25 @@
     margin: 0 0 12px;
     color: var(--ink);
   }
+  .card-head{
+    display:flex;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:10px 12px;
+    margin-bottom:12px;
+  }
+  .card-head h2{ margin:0; }
+  .status-pill{
+    display:inline-flex;
+    align-items:center;
+    font-size:0.7rem;
+    font-weight:600;
+    letter-spacing:0.02em;
+    padding:3px 10px;
+    border-radius:999px;
+    background: var(--grow-soft);
+    color: var(--grow);
+  }
   .card ul{
     margin:0;
     padding:0;
@@ -220,6 +244,8 @@
     background: var(--ink-mute);
   }
   .card li strong{ color:var(--ink); font-weight:600; }
+  .card li.done-item::before{ background: var(--grow); }
+  .card li.done-item strong{ color: var(--grow); }
 
   .asset-grid{
     display:grid;
@@ -300,7 +326,7 @@
     <h1>Erlinda's <em>Wealth Ledger</em></h1>
     <div class="header-meta">
       <div class="stat">
-        <div class="figure">$100,000</div>
+        <div class="figure">&pound;500,000</div>
         <div class="label">target by 2030</div>
       </div>
       <div class="horizon">Six stages, each stage's surplus funding the next &mdash; <strong>2030&ndash;2032</strong> horizon.</div>
@@ -309,13 +335,16 @@
 
   <div class="roadmap">
 
-    <div class="stage">
-      <div class="spine"><div class="node">01</div><div class="thread"></div></div>
+    <div class="stage done">
+      <div class="spine"><div class="node"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M4 12.5l5 5L20 6.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="thread"></div></div>
       <div class="card">
         <div class="stage-kicker">Foundation</div>
-        <h2>Establish the base</h2>
+        <div class="card-head">
+          <h2>Establish the base</h2>
+          <span class="status-pill">Debt-free &mdash; achieved</span>
+        </div>
         <ul>
-          <li>Budget plan &mdash; <strong>pay down debts</strong></li>
+          <li class="done-item">Budget plan &mdash; <strong>all debts cleared</strong></li>
           <li>Build a surplus that becomes investable cash flow</li>
         </ul>
       </div>
