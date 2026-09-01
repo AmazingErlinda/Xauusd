@@ -1,0 +1,402 @@
+<title>Erlinda's Wealth Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    color-scheme: light;
+    --ink:        #1a231d;
+    --ink-soft:   #46503f;
+    --ink-mute:   #7c8271;
+    --paper:      #f1f2ea;
+    --surface:    #faf9f2;
+    --surface-2:  #eceee2;
+    --line:       #d8dac9;
+    --line-soft:  #e4e5da;
+    --accent:     #a97a2e;
+    --accent-ink: #6f4f1c;
+    --accent-soft:#e9d9b4;
+    --grow:       #3c6b4c;
+    --grow-soft:  #d9e6d4;
+    --shadow: rgba(26,35,29,0.08);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      color-scheme: dark;
+      --ink:        #ece7d8;
+      --ink-soft:   #bcb8a6;
+      --ink-mute:   #8d8b78;
+      --paper:      #12160f;
+      --surface:    #191d15;
+      --surface-2:  #21261a;
+      --line:       #333827;
+      --line-soft:  #262b1d;
+      --accent:     #d9a854;
+      --accent-ink: #f0c988;
+      --accent-soft:#3a2f16;
+      --grow:       #7fb28e;
+      --grow-soft:  #1f2c22;
+      --shadow: rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    color-scheme: dark;
+    --ink:        #ece7d8;
+    --ink-soft:   #bcb8a6;
+    --ink-mute:   #8d8b78;
+    --paper:      #12160f;
+    --surface:    #191d15;
+    --surface-2:  #21261a;
+    --line:       #333827;
+    --line-soft:  #262b1d;
+    --accent:     #d9a854;
+    --accent-ink: #f0c988;
+    --accent-soft:#3a2f16;
+    --grow:       #7fb28e;
+    --grow-soft:  #1f2c22;
+    --shadow: rgba(0,0,0,0.35);
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:"Work Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{ font-family:"IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .page{
+    max-width: 880px;
+    margin: 0 auto;
+    padding: clamp(28px, 6vw, 72px) clamp(20px, 5vw, 40px) 80px;
+  }
+
+  /* ---------- Header ---------- */
+  header{
+    display:flex;
+    flex-direction:column;
+    gap:22px;
+    padding-bottom: 36px;
+    margin-bottom: 44px;
+    border-bottom: 1px solid var(--line);
+  }
+  .eyebrow{
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  h1{
+    font-family:"Fraunces", Georgia, serif;
+    font-optical-sizing: auto;
+    font-weight: 500;
+    font-size: clamp(2.1rem, 5vw, 3.1rem);
+    line-height: 1.05;
+    margin: 0;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  h1 em{
+    font-style: italic;
+    color: var(--accent-ink);
+  }
+  .header-meta{
+    display:flex;
+    flex-wrap:wrap;
+    gap: 28px 44px;
+    align-items: flex-end;
+  }
+  .stat .figure{
+    font-family:"IBM Plex Mono", monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: clamp(2rem, 5vw, 2.6rem);
+    color: var(--accent-ink);
+    line-height:1;
+  }
+  .stat .label{
+    margin-top:8px;
+    font-size:0.8rem;
+    color: var(--ink-mute);
+    letter-spacing:0.03em;
+  }
+  .horizon{
+    font-size:0.95rem;
+    color: var(--ink-soft);
+    max-width: 30ch;
+    line-height:1.5;
+  }
+  .horizon strong{ color:var(--ink); font-weight:600; }
+
+  /* ---------- Roadmap ---------- */
+  .roadmap{
+    position: relative;
+    display:flex;
+    flex-direction:column;
+    gap: 0;
+  }
+  .stage{
+    position:relative;
+    display:grid;
+    grid-template-columns: 56px 1fr;
+    column-gap: 22px;
+    padding-bottom: 40px;
+  }
+  .stage:last-child{ padding-bottom:0; }
+  .spine{
+    grid-column:1;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+  }
+  .node{
+    width:44px; height:44px;
+    border-radius:50%;
+    background: var(--surface);
+    border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center;
+    font-family:"IBM Plex Mono", monospace;
+    font-size:0.82rem;
+    color: var(--accent-ink);
+    font-weight:500;
+    flex:none;
+    z-index:1;
+  }
+  .stage.emphasis .node{
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  .thread{
+    width:1px;
+    flex:1;
+    background: var(--line);
+    margin-top:4px;
+  }
+  .stage:last-child .thread{ display:none; }
+
+  .card{
+    background: var(--surface);
+    border:1px solid var(--line-soft);
+    border-radius: 4px;
+    padding: 20px 24px 22px;
+    box-shadow: 0 1px 2px var(--shadow);
+  }
+  .stage-kicker{
+    font-size:0.7rem;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    color: var(--ink-mute);
+    margin-bottom: 6px;
+  }
+  .card h2{
+    font-family:"Fraunces", Georgia, serif;
+    font-weight:500;
+    font-size:1.32rem;
+    margin: 0 0 12px;
+    color: var(--ink);
+  }
+  .card ul{
+    margin:0;
+    padding:0;
+    list-style:none;
+    display:flex;
+    flex-direction:column;
+    gap:7px;
+  }
+  .card li{
+    position:relative;
+    padding-left: 16px;
+    font-size:0.94rem;
+    line-height:1.5;
+    color: var(--ink-soft);
+    max-width: 58ch;
+  }
+  .card li::before{
+    content:"";
+    position:absolute;
+    left:0; top:0.62em;
+    width:5px; height:5px;
+    border-radius:50%;
+    background: var(--ink-mute);
+  }
+  .card li strong{ color:var(--ink); font-weight:600; }
+
+  .asset-grid{
+    display:grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px,1fr));
+    gap:8px;
+    margin: 4px 0 14px;
+  }
+  .asset{
+    border:1px solid var(--line);
+    border-radius:3px;
+    padding:8px 10px;
+    font-size:0.82rem;
+    color: var(--ink-soft);
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+    background: var(--surface-2);
+  }
+  .asset span:last-child{
+    font-family:"IBM Plex Mono", monospace;
+    font-size:0.72rem;
+    color: var(--ink-mute);
+    letter-spacing:0.02em;
+  }
+  .outflow{
+    margin-top: 4px;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    font-size:0.86rem;
+    color: var(--grow);
+    font-weight:600;
+  }
+  .outflow svg{ flex:none; }
+
+  .branch{
+    margin-top:16px;
+    margin-left: 8px;
+    padding: 12px 16px;
+    border-left: 2px solid var(--accent);
+    background: var(--surface-2);
+    border-radius: 0 3px 3px 0;
+    display:flex;
+    flex-direction:column;
+    gap:2px;
+  }
+  .branch .b-kicker{
+    font-size:0.68rem;
+    letter-spacing:0.1em;
+    text-transform:uppercase;
+    color: var(--accent-ink);
+    font-weight:600;
+  }
+  .branch p{ margin:2px 0 0; font-size:0.88rem; color:var(--ink-soft); }
+
+  footer{
+    margin-top: 56px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:10px;
+    font-size:0.78rem;
+    color: var(--ink-mute);
+  }
+
+  @media (max-width:520px){
+    .stage{ grid-template-columns: 40px 1fr; column-gap:14px; }
+    .node{ width:36px; height:36px; font-size:0.72rem; }
+  }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Wealth &amp; Growth Plan</div>
+    <h1>Erlinda's <em>Wealth Ledger</em></h1>
+    <div class="header-meta">
+      <div class="stat">
+        <div class="figure">$100,000</div>
+        <div class="label">target by 2030</div>
+      </div>
+      <div class="horizon">Six stages, each stage's surplus funding the next &mdash; <strong>2030&ndash;2032</strong> horizon.</div>
+    </div>
+  </header>
+
+  <div class="roadmap">
+
+    <div class="stage">
+      <div class="spine"><div class="node">01</div><div class="thread"></div></div>
+      <div class="card">
+        <div class="stage-kicker">Foundation</div>
+        <h2>Establish the base</h2>
+        <ul>
+          <li>Budget plan &mdash; <strong>pay down debts</strong></li>
+          <li>Build a surplus that becomes investable cash flow</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="spine"><div class="node">02</div><div class="thread"></div></div>
+      <div class="card">
+        <div class="stage-kicker">Income</div>
+        <h2>Generate</h2>
+        <ul>
+          <li>Employment income <strong>+</strong> supplemental income</li>
+          <li>Direct a fixed <strong>20%</strong> of income into the plan</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="spine"><div class="node">03</div><div class="thread"></div></div>
+      <div class="card">
+        <div class="stage-kicker">Cash Flow</div>
+        <h2>Reinvest &amp; grow</h2>
+        <ul>
+          <li>Earned income &mdash; wages / business &rarr; <strong>investment</strong></li>
+          <li>Gold &mdash; the surplus that funds every stage</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="stage emphasis">
+      <div class="spine"><div class="node">04</div><div class="thread"></div></div>
+      <div class="card">
+        <div class="stage-kicker">Assets</div>
+        <h2>Accumulate</h2>
+        <div class="asset-grid">
+          <div class="asset"><span>Gold</span><span>CFD</span></div>
+          <div class="asset"><span>Silver</span><span>CFD</span></div>
+          <div class="asset"><span>BTCUSD</span><span>CFD</span></div>
+          <div class="asset"><span>Stocks</span><span>Investment</span></div>
+        </div>
+        <div class="outflow">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 4v16M12 20l-6-6M12 20l6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Profit
+        </div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="spine"><div class="node">05</div><div class="thread"></div></div>
+      <div class="card">
+        <div class="stage-kicker">Protection</div>
+        <h2>Preserve what's built</h2>
+        <ul>
+          <li>Property</li>
+          <li>Trust</li>
+          <li>Physical assets &mdash; gold coin &amp; silver</li>
+        </ul>
+        <div class="branch">
+          <div class="b-kicker">Runs alongside</div>
+          <p>Community &mdash; a team of analysts</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="spine"><div class="node">06</div></div>
+      <div class="card">
+        <div class="stage-kicker">Trading</div>
+        <h2>Cash flow</h2>
+        <ul>
+          <li>Tracking &amp; execution</li>
+          <li>Reinvest</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+
+  <footer>
+    <span>Erlinda &middot; Wealth &amp; Growth Plan</span>
+    <span class="mono">Horizon 2030&ndash;2032</span>
+  </footer>
+
+</div>
