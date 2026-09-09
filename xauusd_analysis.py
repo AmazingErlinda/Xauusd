@@ -188,6 +188,19 @@ def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -
     })
 
 
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"]
     out = df.copy()
@@ -196,6 +209,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["sma_200"] = sma(close, 200)
     out["ema_20"] = ema(close, 20)
     out["rsi_14"] = rsi(close, 14)
+    out["atr_14"] = atr(df, 14)
 
     macd_df = macd(close)
     out["macd"] = macd_df["macd"]
@@ -247,6 +261,150 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
         signals.append(Signal("bollinger", "neutral", "price within bands"))
 
     return signals
+
+
+@dataclass
+class SwingPoint:
+    time: pd.Timestamp
+    price: float
+    kind: str  # "high" | "low"
+
+
+def find_swing_points(df: pd.DataFrame, order: int = 5) -> list[SwingPoint]:
+    """Return confirmed swing highs/lows: bars whose high/low is the extreme
+    within `order` bars on both sides."""
+    highs, lows = df["high"], df["low"]
+    points: list[SwingPoint] = []
+    for i in range(order, len(df) - order):
+        high_window = highs.iloc[i - order : i + order + 1]
+        if highs.iloc[i] == high_window.max():
+            points.append(SwingPoint(df.index[i], float(highs.iloc[i]), "high"))
+        low_window = lows.iloc[i - order : i + order + 1]
+        if lows.iloc[i] == low_window.min():
+            points.append(SwingPoint(df.index[i], float(lows.iloc[i]), "low"))
+    return points
+
+
+def key_levels(
+    swings: list[SwingPoint], price: float, num_levels: int = 3
+) -> tuple[list[float], list[float]]:
+    """Nearest swing-based resistance levels (above price) and support levels
+    (below price), closest first."""
+    resistances = sorted({round(p.price, 2) for p in swings if p.kind == "high" and p.price > price})
+    supports = sorted(
+        {round(p.price, 2) for p in swings if p.kind == "low" and p.price < price}, reverse=True
+    )
+    return resistances[:num_levels], supports[:num_levels]
+
+
+@dataclass
+class TradeSetup:
+    bias: str
+    price: float
+    atr: float
+    tested_level: float
+    level_kind: str  # "resistance" | "support"
+    fade_entry: float
+    fade_stop: float
+    fade_targets: list[float]
+    breakout_entry: float
+    breakout_stop: float
+    breakout_targets: list[float]
+    rationale: str
+
+
+def build_trade_setup(
+    df: pd.DataFrame, signals: list[Signal], order: int = 5, num_levels: int = 3
+) -> TradeSetup:
+    """Derive a two-sided (fade vs. breakout) trade setup around the nearest
+    tested support/resistance level, sized off ATR.
+
+    Mirrors manual chart reading: find the key level price is currently
+    testing, then define a reversal (fade) plan and a continuation
+    (breakout) plan around it.
+    """
+    last = df.iloc[-1]
+    price = float(last["close"])
+    atr_val = float(last["atr_14"]) if pd.notna(last["atr_14"]) else price * 0.005
+
+    swings = find_swing_points(df, order=order)
+    resistances, supports = key_levels(swings, price, num_levels=num_levels)
+
+    resistance = resistances[0] if resistances else price + 2 * atr_val
+    support = supports[0] if supports else price - 2 * atr_val
+    next_resistance = resistances[1] if len(resistances) > 1 else resistance + 2 * atr_val
+    next_support = supports[1] if len(supports) > 1 else support - 2 * atr_val
+    far_resistance = resistances[2] if len(resistances) > 2 else next_resistance + 2 * atr_val
+    far_support = supports[2] if len(supports) > 2 else next_support - 2 * atr_val
+
+    trend = next(s for s in signals if s.name == "trend")
+
+    if abs(resistance - price) <= abs(price - support):
+        level_kind = "resistance"
+        tested_level = resistance
+        fade_entry = resistance
+        fade_stop = round(resistance + atr_val, 2)
+        fade_targets = [round(v, 2) for v in (support, next_support, far_support)]
+        breakout_entry = round(resistance + 0.25 * atr_val, 2)
+        breakout_stop = round(resistance - atr_val, 2)
+        breakout_targets = [
+            round(v, 2) for v in (next_resistance, far_resistance, far_resistance + 2 * atr_val)
+        ]
+        bias = "bearish (fade) / bullish (breakout)"
+        rationale = (
+            f"Price {price:.2f} is testing resistance at {resistance:.2f} "
+            f"({trend.detail}). Fade the level unless it breaks and holds above "
+            f"{breakout_entry:.2f}."
+        )
+    else:
+        level_kind = "support"
+        tested_level = support
+        fade_entry = support
+        fade_stop = round(support - atr_val, 2)
+        fade_targets = [round(v, 2) for v in (resistance, next_resistance, far_resistance)]
+        breakout_entry = round(support - 0.25 * atr_val, 2)
+        breakout_stop = round(support + atr_val, 2)
+        breakout_targets = [
+            round(v, 2) for v in (next_support, far_support, far_support - 2 * atr_val)
+        ]
+        bias = "bullish (fade) / bearish (breakout)"
+        rationale = (
+            f"Price {price:.2f} is testing support at {support:.2f} "
+            f"({trend.detail}). Fade the level (buy the bounce) unless it breaks "
+            f"and holds below {breakout_entry:.2f}."
+        )
+
+    return TradeSetup(
+        bias=bias,
+        price=round(price, 2),
+        atr=round(atr_val, 2),
+        tested_level=round(tested_level, 2),
+        level_kind=level_kind,
+        fade_entry=round(fade_entry, 2),
+        fade_stop=fade_stop,
+        fade_targets=fade_targets,
+        breakout_entry=breakout_entry,
+        breakout_stop=breakout_stop,
+        breakout_targets=breakout_targets,
+        rationale=rationale,
+    )
+
+
+def print_trade_setup(setup: TradeSetup) -> None:
+    print("=" * 50)
+    print(f"TRADE SETUP  (price {setup.price}, ATR14 {setup.atr})")
+    print(f"Testing {setup.level_kind} at {setup.tested_level}")
+    print(setup.rationale)
+    print("-" * 50)
+    print(
+        f"Fade:     entry {setup.fade_entry}  stop {setup.fade_stop}  "
+        f"targets {setup.fade_targets}"
+    )
+    print(
+        f"Breakout: entry {setup.breakout_entry}  stop {setup.breakout_stop}  "
+        f"targets {setup.breakout_targets}"
+    )
+    print("=" * 50)
 
 
 def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
@@ -307,6 +465,14 @@ def main() -> None:
     parser.add_argument("--mt5-path", default=None, help="Path to terminal64.exe, if not auto-detected (or set MT5_PATH)")
     parser.add_argument("--chart-output", default="xauusd_chart.png")
     parser.add_argument("--data-output", default="xauusd_data.csv")
+    parser.add_argument(
+        "--swing-order", type=int, default=5,
+        help="bars required on each side to confirm a swing high/low",
+    )
+    parser.add_argument(
+        "--level-count", type=int, default=3,
+        help="number of support/resistance levels to consider",
+    )
     args = parser.parse_args()
 
     if args.source == "mt5":
@@ -327,6 +493,9 @@ def main() -> None:
     df = compute_indicators(df)
     signals = generate_signals(df)
     print_summary(df, signals)
+
+    setup = build_trade_setup(df, signals, order=args.swing_order, num_levels=args.level_count)
+    print_trade_setup(setup)
 
     df.to_csv(args.data_output)
     print(f"Data saved to {args.data_output}")
