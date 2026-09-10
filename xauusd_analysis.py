@@ -181,10 +181,14 @@ def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> 
 def bollinger_bands(series: pd.Series, period: int = 20, num_std: float = 2.0) -> pd.DataFrame:
     mid = sma(series, period)
     std = series.rolling(period).std()
+    upper = mid + num_std * std
+    lower = mid - num_std * std
     return pd.DataFrame({
         "mid": mid,
-        "upper": mid + num_std * std,
-        "lower": mid - num_std * std,
+        "upper": upper,
+        "lower": lower,
+        "percent_b": (series - lower) / (upper - lower),
+        "bandwidth": (upper - lower) / mid,
     })
 
 
@@ -206,6 +210,11 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["bb_upper"] = bb_df["upper"]
     out["bb_mid"] = bb_df["mid"]
     out["bb_lower"] = bb_df["lower"]
+    out["bb_percent_b"] = bb_df["percent_b"]
+    out["bb_bandwidth"] = bb_df["bandwidth"]
+    # squeeze: bandwidth near the bottom of its own recent range -> volatility
+    # is compressed and a breakout may be building
+    out["bb_squeeze"] = out["bb_bandwidth"] <= out["bb_bandwidth"].rolling(100, min_periods=20).quantile(0.1)
     return out
 
 
@@ -239,12 +248,27 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
     else:
         signals.append(Signal("macd", "bearish", "MACD below signal line"))
 
-    if last["close"] >= last["bb_upper"]:
-        signals.append(Signal("bollinger", "bearish", "price at/above upper band"))
+    uptrend = last["sma_20"] > last["sma_50"]
+    downtrend = last["sma_20"] < last["sma_50"]
+
+    if last["bb_squeeze"]:
+        signals.append(Signal("bollinger", "neutral", f"squeeze (bandwidth {last['bb_bandwidth']:.3f}) - breakout may be building"))
+    elif last["close"] >= last["bb_upper"]:
+        if uptrend:
+            signals.append(Signal("bollinger", "neutral", "riding upper band in uptrend - not a fade signal"))
+        elif last["rsi_14"] > 65:
+            signals.append(Signal("bollinger", "bearish", "overbought at upper band, no uptrend support"))
+        else:
+            signals.append(Signal("bollinger", "neutral", "at upper band but RSI not confirming"))
     elif last["close"] <= last["bb_lower"]:
-        signals.append(Signal("bollinger", "bullish", "price at/below lower band"))
+        if downtrend:
+            signals.append(Signal("bollinger", "neutral", "riding lower band in downtrend - not a fade signal"))
+        elif last["rsi_14"] < 35:
+            signals.append(Signal("bollinger", "bullish", "oversold at lower band, no downtrend support"))
+        else:
+            signals.append(Signal("bollinger", "neutral", "at lower band but RSI not confirming"))
     else:
-        signals.append(Signal("bollinger", "neutral", "price within bands"))
+        signals.append(Signal("bollinger", "neutral", f"price within bands (%B {last['bb_percent_b']:.2f})"))
 
     return signals
 
