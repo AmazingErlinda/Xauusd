@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import requests
 
@@ -216,7 +217,119 @@ class Signal:
     detail: str
 
 
-def generate_signals(df: pd.DataFrame) -> list[Signal]:
+def fibonacci_levels(df: pd.DataFrame, lookback: int = 90) -> dict[str, float]:
+    """Retracement levels for the most extreme high/low swing in the last
+    `lookback` bars. Levels run from the swing that happened *first* toward
+    the one that happened *last*, matching how a trader would draw the tool.
+    """
+    window = df.iloc[-lookback:]
+    swing_high = window["high"].max()
+    swing_low = window["low"].min()
+    diff = swing_high - swing_low
+    ratios = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+
+    high_idx = window["high"].idxmax()
+    low_idx = window["low"].idxmin()
+    if high_idx > low_idx:
+        # low came first, then the high -> retracement measured down from the high
+        return {f"{r:.3f}": swing_high - diff * r for r in ratios}
+    return {f"{r:.3f}": swing_low + diff * r for r in ratios}
+
+
+def find_pivots(series: pd.Series, left: int = 3, right: int = 3, kind: str = "high") -> pd.Series:
+    """Boolean mask marking local pivot highs/lows over a left/right window."""
+    window = left + right + 1
+    if kind == "high":
+        is_pivot = series == series.rolling(window, center=True).max()
+    else:
+        is_pivot = series == series.rolling(window, center=True).min()
+    return is_pivot.fillna(False)
+
+
+def latest_trendline(
+    df: pd.DataFrame, kind: str = "high", left: int = 3, right: int = 3, num_pivots: int = 3
+) -> tuple[float, float] | None:
+    """Fit a line through the last `num_pivots` pivot highs (or lows).
+
+    Returns (slope, intercept) in bar-index space, or None if there aren't
+    enough confirmed pivots yet.
+    """
+    col = "high" if kind == "high" else "low"
+    pivots = find_pivots(df[col], left, right, kind)
+    positions = np.flatnonzero(pivots.to_numpy())
+    if len(positions) < num_pivots:
+        return None
+    positions = positions[-num_pivots:]
+    prices = df[col].to_numpy()[positions]
+    slope, intercept = np.polyfit(positions, prices, 1)
+    return slope, intercept
+
+
+def trendline_break_signal(
+    df: pd.DataFrame, kind: str = "high", left: int = 3, right: int = 3, num_pivots: int = 3
+) -> Signal | None:
+    """Detect a close back through a descending-highs (resistance) or
+    ascending-lows (support) trendline built from recent swing pivots -
+    the same construction as drawing a trendline across chart pivots by hand.
+    """
+    line = latest_trendline(df, kind, left, right, num_pivots)
+    if line is None:
+        return None
+    slope, intercept = line
+    last_pos = len(df) - 1
+    line_value = slope * last_pos + intercept
+    close = df["close"].iloc[-1]
+
+    if kind == "high" and slope < 0:
+        if close > line_value:
+            return Signal("trendline", "bullish", f"closed above descending trendline ({line_value:.2f})")
+        return Signal("trendline", "bearish", f"below descending trendline ({line_value:.2f})")
+    if kind == "low" and slope > 0:
+        if close < line_value:
+            return Signal("trendline", "bearish", f"closed below ascending trendline ({line_value:.2f})")
+        return Signal("trendline", "bullish", f"above ascending trendline ({line_value:.2f})")
+    return None
+
+
+def fib_position_signal(df: pd.DataFrame, levels: dict[str, float]) -> Signal:
+    close = df["close"].iloc[-1]
+    ordered = sorted(levels.items(), key=lambda kv: kv[1])
+    below = [kv for kv in ordered if kv[1] <= close]
+    above = [kv for kv in ordered if kv[1] > close]
+    if below and above:
+        lo_name, lo_price = below[-1]
+        hi_name, hi_price = above[0]
+        detail = f"between {lo_name} ({lo_price:.2f}) and {hi_name} ({hi_price:.2f})"
+    elif above:
+        detail = f"below {above[0][0]} ({above[0][1]:.2f})"
+    else:
+        detail = f"above {below[-1][0]} ({below[-1][1]:.2f})"
+    return Signal("fibonacci", "neutral", detail)
+
+
+def level_watch_signal(df: pd.DataFrame, level: float, lookback: int = 5) -> Signal:
+    """Flag a fresh reclaim/loss of a specific price level (e.g. a pivot or
+    yearly level) over the last `lookback` closes.
+    """
+    recent = df["close"].iloc[-lookback:]
+    now = recent.iloc[-1]
+    prior = recent.iloc[:-1]
+    if now > level and (prior < level).any():
+        return Signal("level_watch", "bullish", f"reclaimed {level:.2f}")
+    if now < level and (prior > level).any():
+        return Signal("level_watch", "bearish", f"lost {level:.2f}")
+    side = "above" if now > level else "below"
+    return Signal("level_watch", "neutral", f"holding {side} {level:.2f}, no fresh cross")
+
+
+def generate_signals(
+    df: pd.DataFrame,
+    fib_levels: dict[str, float] | None = None,
+    watch_level: float | None = None,
+    pivot_left: int = 3,
+    pivot_right: int = 3,
+    trendline_pivots: int = 3,
+) -> list[Signal]:
     last = df.iloc[-1]
     signals: list[Signal] = []
 
@@ -246,6 +359,17 @@ def generate_signals(df: pd.DataFrame) -> list[Signal]:
     else:
         signals.append(Signal("bollinger", "neutral", "price within bands"))
 
+    for kind in ("high", "low"):
+        trend_signal = trendline_break_signal(df, kind, pivot_left, pivot_right, trendline_pivots)
+        if trend_signal is not None:
+            signals.append(trend_signal)
+
+    if fib_levels is not None:
+        signals.append(fib_position_signal(df, fib_levels))
+
+    if watch_level is not None:
+        signals.append(level_watch_signal(df, watch_level))
+
     return signals
 
 
@@ -267,7 +391,12 @@ def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
         print("Overall bias: NEUTRAL")
 
 
-def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
+def plot_chart(
+    df: pd.DataFrame,
+    output_path: str = "xauusd_chart.png",
+    fib_levels: dict[str, float] | None = None,
+    watch_level: float | None = None,
+) -> None:
     fig, (ax_price, ax_rsi) = plt.subplots(
         2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
     )
@@ -278,6 +407,16 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
     ax_price.fill_between(
         df.index, df["bb_lower"], df["bb_upper"], color="gray", alpha=0.15, label="Bollinger Bands"
     )
+
+    if fib_levels:
+        for name, price in fib_levels.items():
+            ax_price.axhline(price, color="orange", linestyle=":", linewidth=0.8, alpha=0.6)
+            ax_price.text(df.index[-1], price, f" fib {name}", fontsize=7, va="center", color="darkorange")
+
+    if watch_level is not None:
+        ax_price.axhline(watch_level, color="blue", linestyle="--", linewidth=1, alpha=0.8)
+        ax_price.text(df.index[-1], watch_level, f" watch {watch_level:.2f}", fontsize=7, va="center", color="blue")
+
     ax_price.set_ylabel("Price (USD)")
     ax_price.set_title("XAUUSD Price & Moving Averages")
     ax_price.legend(loc="upper left")
@@ -307,6 +446,11 @@ def main() -> None:
     parser.add_argument("--mt5-path", default=None, help="Path to terminal64.exe, if not auto-detected (or set MT5_PATH)")
     parser.add_argument("--chart-output", default="xauusd_chart.png")
     parser.add_argument("--data-output", default="xauusd_data.csv")
+    parser.add_argument("--fib-lookback", type=int, default=90, help="Bars used to find the swing high/low for Fibonacci levels")
+    parser.add_argument("--pivot-left", type=int, default=3, help="Bars to the left required to confirm a swing pivot")
+    parser.add_argument("--pivot-right", type=int, default=3, help="Bars to the right required to confirm a swing pivot")
+    parser.add_argument("--trendline-pivots", type=int, default=3, help="Number of recent pivots used to fit the trendline")
+    parser.add_argument("--watch-level", type=float, default=None, help="Price level to flag a reclaim/loss on, e.g. 4333.99")
     args = parser.parse_args()
 
     if args.source == "mt5":
@@ -325,12 +469,20 @@ def main() -> None:
         )
 
     df = compute_indicators(df)
-    signals = generate_signals(df)
+    fib_levels = fibonacci_levels(df, args.fib_lookback)
+    signals = generate_signals(
+        df,
+        fib_levels=fib_levels,
+        watch_level=args.watch_level,
+        pivot_left=args.pivot_left,
+        pivot_right=args.pivot_right,
+        trendline_pivots=args.trendline_pivots,
+    )
     print_summary(df, signals)
 
     df.to_csv(args.data_output)
     print(f"Data saved to {args.data_output}")
-    plot_chart(df, args.chart_output)
+    plot_chart(df, args.chart_output, fib_levels=fib_levels, watch_level=args.watch_level)
 
 
 if __name__ == "__main__":
