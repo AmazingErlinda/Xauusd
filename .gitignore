@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+xauusd_chart.png
+xauusd_data.csv
+.pytest_cache/

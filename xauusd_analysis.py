@@ -12,9 +12,17 @@ Data sources:
   twelvedata - fallback REST API source, free tier at https://twelvedata.com.
       Set TWELVEDATA_API_KEY or pass --api-key.
 
+  csv - offline OHLCV file (e.g. a previous --data-output export). Needs a
+      time/datetime column plus open, high, low, close (volume optional).
+
+On top of the classic indicator signals, a quant layer (quant.py) adds regime
+detection, a composite score, an ATR-sized trade plan and a backtest. Use
+--lookback 1000+ for meaningful backtest statistics.
+
 Usage:
-    python xauusd_analysis.py --source mt5 --interval H1 --lookback 300
-    python xauusd_analysis.py --source twelvedata --interval 1h --lookback 300
+    python xauusd_analysis.py --source mt5 --interval H1 --lookback 2000
+    python xauusd_analysis.py --source twelvedata --interval 1h --lookback 2000
+    python xauusd_analysis.py --source csv --csv-path xauusd_data.csv --equity 25000 --risk-pct 0.5
 """
 
 from __future__ import annotations
@@ -28,6 +36,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import requests
+
+from quant import print_quant_report, run_quant_analysis
 
 TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
 
@@ -150,6 +160,20 @@ def _parse_twelvedata_response(payload: dict) -> pd.DataFrame:
     return df[["open", "high", "low", "close", "volume"]]
 
 
+def load_price_data_csv(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df.columns = [c.strip().lower() for c in df.columns]
+    time_col = next((c for c in ("time", "datetime", "date", "timestamp") if c in df.columns), df.columns[0])
+    df[time_col] = pd.to_datetime(df[time_col])
+    df = df.set_index(time_col).sort_index()
+    missing = {"open", "high", "low", "close"} - set(df.columns)
+    if missing:
+        raise ValueError(f"CSV {path} is missing columns: {sorted(missing)}")
+    if "volume" not in df.columns:
+        df["volume"] = 0.0
+    return df[["open", "high", "low", "close", "volume"]].astype(float)
+
+
 def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period).mean()
 
@@ -268,9 +292,12 @@ def print_summary(df: pd.DataFrame, signals: list[Signal]) -> None:
 
 
 def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
-    fig, (ax_price, ax_rsi) = plt.subplots(
-        2, 1, figsize=(12, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
+    has_quant = "score" in df.columns
+    ratios = [3, 1, 1, 1] if has_quant else [3, 1]
+    fig, axes = plt.subplots(
+        len(ratios), 1, figsize=(12, 4 + 2 * len(ratios)), sharex=True, gridspec_kw={"height_ratios": ratios}
     )
+    ax_price, ax_rsi = axes[0], axes[1]
 
     ax_price.plot(df.index, df["close"], label="Close", color="black", linewidth=1.2)
     ax_price.plot(df.index, df["sma_20"], label="SMA 20", linewidth=1)
@@ -288,6 +315,20 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
     ax_rsi.set_ylabel("RSI 14")
     ax_rsi.set_ylim(0, 100)
 
+    if has_quant:
+        ax_score, ax_eq = axes[2], axes[3]
+        ax_score.fill_between(df.index, 0, df["score"], where=df["score"] >= 0, color="green", alpha=0.4)
+        ax_score.fill_between(df.index, 0, df["score"], where=df["score"] < 0, color="red", alpha=0.4)
+        ax_score.axhline(0, color="black", linewidth=0.6)
+        ax_score.set_ylim(-1, 1)
+        ax_score.set_ylabel("Composite")
+
+        buy_hold = df["close"] / df["close"].iloc[0]
+        ax_eq.plot(df.index, df["equity"], label="Strategy", color="tab:blue", linewidth=1)
+        ax_eq.plot(df.index, buy_hold, label="Buy & hold", color="gray", linewidth=1, linestyle="--")
+        ax_eq.set_ylabel("Equity (x)")
+        ax_eq.legend(loc="upper left")
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -296,7 +337,8 @@ def plot_chart(df: pd.DataFrame, output_path: str = "xauusd_chart.png") -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="XAUUSD technical analysis")
-    parser.add_argument("--source", choices=["mt5", "twelvedata"], default="mt5")
+    parser.add_argument("--source", choices=["mt5", "twelvedata", "csv"], default="mt5")
+    parser.add_argument("--csv-path", default=None, help="OHLCV CSV file for --source csv")
     parser.add_argument("--symbol", default=None, help="Defaults to XAUUSD for mt5, XAU/USD for twelvedata")
     parser.add_argument("--interval", default=None, help="Defaults to H1 for mt5, 1h for twelvedata")
     parser.add_argument("--lookback", type=int, default=300)
@@ -307,6 +349,11 @@ def main() -> None:
     parser.add_argument("--mt5-path", default=None, help="Path to terminal64.exe, if not auto-detected (or set MT5_PATH)")
     parser.add_argument("--chart-output", default="xauusd_chart.png")
     parser.add_argument("--data-output", default="xauusd_data.csv")
+    parser.add_argument("--equity", type=float, default=10_000.0, help="Account equity in USD for position sizing")
+    parser.add_argument("--risk-pct", type=float, default=1.0, help="Percent of equity risked per trade")
+    parser.add_argument("--spread", type=float, default=0.30, help="Round-trip cost in USD/oz for the backtest")
+    parser.add_argument("--entry-threshold", type=float, default=0.25, help="Composite score needed to enter (0-1)")
+    parser.add_argument("--no-quant", action="store_true", help="Skip the quant layer (classic signals only)")
     args = parser.parse_args()
 
     if args.source == "mt5":
@@ -319,6 +366,12 @@ def main() -> None:
             server=args.mt5_server,
             path=args.mt5_path,
         )
+    elif args.source == "csv":
+        if not args.csv_path:
+            parser.error("--csv-path is required with --source csv")
+        df = load_price_data_csv(args.csv_path)
+        if args.lookback:
+            df = df.tail(args.lookback)
     else:
         df = fetch_price_data_twelvedata(
             args.symbol or "XAU/USD", args.interval or "1h", args.lookback, api_key=args.api_key
@@ -327,6 +380,13 @@ def main() -> None:
     df = compute_indicators(df)
     signals = generate_signals(df)
     print_summary(df, signals)
+
+    if not args.no_quant:
+        df, plan, result, hurst = run_quant_analysis(
+            df, equity=args.equity, risk_pct=args.risk_pct, spread=args.spread,
+            entry_threshold=args.entry_threshold,
+        )
+        print_quant_report(df, plan, result, hurst)
 
     df.to_csv(args.data_output)
     print(f"Data saved to {args.data_output}")
