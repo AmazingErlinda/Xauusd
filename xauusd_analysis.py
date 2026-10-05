@@ -12,8 +12,8 @@ Data sources:
   twelvedata - fallback REST API source, free tier at https://twelvedata.com.
       Set TWELVEDATA_API_KEY or pass --api-key.
 
-  csv - offline OHLCV file (e.g. a previous --data-output export). Needs a
-      time/datetime column plus open, high, low, close (volume optional).
+  csv - offline OHLCV file: an MT5 "Export Bars" file, a TradingView
+      "Export chart data" file, or a previous --data-output export.
 
 On top of the classic indicator signals, a quant layer (quant.py) adds regime
 detection, a composite score, an ATR-sized trade plan and a backtest. Use
@@ -161,16 +161,35 @@ def _parse_twelvedata_response(payload: dict) -> pd.DataFrame:
 
 
 def load_price_data_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df.columns = [c.strip().lower() for c in df.columns]
-    time_col = next((c for c in ("time", "datetime", "date", "timestamp") if c in df.columns), df.columns[0])
-    df[time_col] = pd.to_datetime(df[time_col])
-    df = df.set_index(time_col).sort_index()
+    """Load OHLCV candles from a CSV export. Recognised formats:
+
+      - MetaTrader 5 "Export Bars" (tab-separated, <DATE> <TIME> <OPEN> ... <TICKVOL>)
+      - TradingView "Export chart data" (time as unix seconds or ISO, extra
+        indicator columns are ignored)
+      - this script's own --data-output file
+    """
+    df = pd.read_csv(path, sep=None, engine="python")
+    df.columns = [c.strip().strip("<>").lower() for c in df.columns]
+
+    if "date" in df.columns and "time" in df.columns:  # MT5: separate date/time columns
+        stamps = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str))
+    else:
+        time_col = next((c for c in ("time", "datetime", "date", "timestamp") if c in df.columns), df.columns[0])
+        raw = df[time_col]
+        stamps = (
+            pd.to_datetime(raw, unit="s")  # TradingView default: unix seconds
+            if pd.api.types.is_numeric_dtype(raw)
+            else pd.to_datetime(raw, utc=True).dt.tz_localize(None)
+        )
+    df.index = pd.DatetimeIndex(stamps)
+    df = df.sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+
     missing = {"open", "high", "low", "close"} - set(df.columns)
     if missing:
         raise ValueError(f"CSV {path} is missing columns: {sorted(missing)}")
-    if "volume" not in df.columns:
-        df["volume"] = 0.0
+    volume_col = next((c for c in ("volume", "tickvol", "vol") if c in df.columns), None)
+    df["volume"] = df[volume_col] if volume_col else 0.0
     return df[["open", "high", "low", "close", "volume"]].astype(float)
 
 

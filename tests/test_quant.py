@@ -65,3 +65,26 @@ def test_hurst_random_walk_near_half():
     rng = np.random.default_rng(1)
     walk = pd.Series(3000 * np.exp(np.cumsum(rng.normal(0, 0.003, 5000))))
     assert 0.4 < hurst_exponent(walk) < 0.6
+
+
+def test_csv_loader_reads_mt5_and_tradingview_exports(tmp_path):
+    from xauusd_analysis import load_price_data_csv
+
+    df = make_ohlc(n=50)
+    mt5 = pd.DataFrame({
+        "<DATE>": df.index.strftime("%Y.%m.%d"), "<TIME>": df.index.strftime("%H:%M:%S"),
+        "<OPEN>": df.open, "<HIGH>": df.high, "<LOW>": df.low, "<CLOSE>": df.close,
+        "<TICKVOL>": 7, "<VOL>": 0, "<SPREAD>": 16,
+    })
+    mt5.to_csv(tmp_path / "mt5.csv", sep="\t", index=False)
+    tv = pd.DataFrame({
+        "time": [int(t.timestamp()) for t in df.index.tz_localize("UTC")],
+        "open": df.open, "high": df.high, "low": df.low, "close": df.close, "Volume": 7, "RSI": 50,
+    })
+    tv.to_csv(tmp_path / "tv.csv", index=False)
+
+    for name in ("mt5.csv", "tv.csv"):
+        loaded = load_price_data_csv(str(tmp_path / name))
+        assert (loaded.index == df.index).all()
+        assert np.allclose(loaded["close"], df["close"].to_numpy())
+        assert (loaded["volume"] == 7).all()
