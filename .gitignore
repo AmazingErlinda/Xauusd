@@ -3,3 +3,5 @@ __pycache__/
 xauusd_chart.png
 xauusd_data.csv
 .pytest_cache/
+london_session_trades.csv
+london_session_chart.png

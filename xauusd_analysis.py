@@ -171,7 +171,9 @@ def load_price_data_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, sep=None, engine="python")
     df.columns = [c.strip().strip("<>").lower() for c in df.columns]
 
+    fmt = "generic"
     if "date" in df.columns and "time" in df.columns:  # MT5: separate date/time columns
+        fmt = "mt5"
         stamps = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str))
     else:
         time_col = next((c for c in ("time", "datetime", "date", "timestamp") if c in df.columns), df.columns[0])
@@ -190,7 +192,9 @@ def load_price_data_csv(path: str) -> pd.DataFrame:
         raise ValueError(f"CSV {path} is missing columns: {sorted(missing)}")
     volume_col = next((c for c in ("volume", "tickvol", "vol") if c in df.columns), None)
     df["volume"] = df[volume_col] if volume_col else 0.0
-    return df[["open", "high", "low", "close", "volume"]].astype(float)
+    out = df[["open", "high", "low", "close", "volume"]].astype(float)
+    out.attrs["format"] = fmt  # lets callers pick the right timezone (MT5 = broker server time)
+    return out
 
 
 def sma(series: pd.Series, period: int) -> pd.Series:
