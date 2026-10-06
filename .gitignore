@@ -5,3 +5,4 @@ xauusd_data.csv
 .pytest_cache/
 london_session_trades.csv
 london_session_chart.png
+brn_trades.csv
